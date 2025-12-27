@@ -16,31 +16,9 @@ def landing():
 # === PENDAFTARAN ===
 @main.route('/daftar', methods=['GET', 'POST'])
 def daftar():
-    if request.method == 'POST':
-        nama = request.form['nama']
-        wa = request.form['whatsapp']
-        email = request.form.get('email', '')
-        
-        if Peserta.query.filter_by(whatsapp=wa).first():
-            flash('Nomor WhatsApp sudah terdaftar!')
-            return redirect('/daftar')
-        
-        # Buat peserta baru (tanpa akses workshop otomatis)
-        peserta = Peserta(
-            nama=nama,
-            whatsapp=wa,
-            email=email,
-            batch="Menunggu Penugasan"
-        )
-        # Opsional: beri password default atau kosong
-        peserta.set_password("default123")  # bisa diubah nanti via admin
-        
-        db.session.add(peserta)
-        db.session.commit()
-        flash('Pendaftaran berhasil! Silakan login.')
-        return redirect('/login')
-    
-    return render_template('user/register.html')
+    # Arahkan semua ke route pendaftaran utama `/register` untuk konsistensi
+    return redirect(url_for('main.register'))
+
 
 # === LOGIN USER ===
 @main.route('/login', methods=['GET', 'POST'])
@@ -236,14 +214,66 @@ def kelola_peserta():
         return redirect('/admin')
     
     status = request.args.get('status', 'semua')
-    if status == 'belum':
-        peserta_list = Peserta.query.filter_by(status_pembayaran='Belum').all()
-    elif status == 'lunas':
-        peserta_list = Peserta.query.filter_by(status_pembayaran='Lunas').all()
-    else:
-        peserta_list = Peserta.query.all()
+    search = request.args.get('search', '').strip()
     
-    return render_template('admin/kelola_peserta.html', peserta=peserta_list, status_filter=status)
+    query = Peserta.query
+    
+    # Filter by payment status
+    if status == 'belum':
+        query = query.filter_by(status_pembayaran='Belum')
+    elif status == 'menunggu':
+        query = query.filter_by(status_pembayaran='Menunggu')
+    elif status == 'lunas':
+        query = query.filter_by(status_pembayaran='Lunas')
+    elif status == 'ditolak':
+        query = query.filter_by(status_pembayaran='Ditolak')
+    
+    # Search by name or phone
+    if search:
+        query = query.filter(
+            (Peserta.nama.ilike(f'%{search}%')) |
+            (Peserta.whatsapp.ilike(f'%{search}%'))
+        )
+    
+    peserta_list = query.all()
+    total = Peserta.query.count()
+    
+    return render_template('admin/kelola_peserta.html', peserta=peserta_list, status_filter=status, search=search, total=total)
+
+@main.route('/admin/peserta/<int:id>')
+def peserta_detail(id):
+    if not session.get('admin'):
+        return redirect('/admin')
+    
+    peserta = Peserta.query.get_or_404(id)
+    return render_template('admin/peserta_detail.html', peserta=peserta)
+
+@main.route('/admin/peserta/<int:id>/edit', methods=['GET', 'POST'])
+def edit_peserta(id):
+    if not session.get('admin'):
+        return redirect('/admin')
+    
+    peserta = Peserta.query.get_or_404(id)
+    
+    if request.method == 'POST':
+        peserta.nama = request.form.get('nama', peserta.nama)
+        peserta.whatsapp = request.form.get('whatsapp', peserta.whatsapp)
+        peserta.email = request.form.get('email', peserta.email)
+        peserta.alamat = request.form.get('alamat', peserta.alamat)
+        peserta.nama_bengkel = request.form.get('nama_bengkel', peserta.nama_bengkel)
+        peserta.alamat_bengkel = request.form.get('alamat_bengkel', peserta.alamat_bengkel)
+        peserta.status_pekerjaan = request.form.get('status_pekerjaan', peserta.status_pekerjaan)
+        peserta.alasan = request.form.get('alasan', peserta.alasan)
+        peserta.batch = request.form.get('batch', peserta.batch)
+        peserta.status_pembayaran = request.form.get('status_pembayaran', peserta.status_pembayaran)
+        peserta.akses_workshop = 'akses_workshop' in request.form
+        
+        db.session.commit()
+        flash(f'Data peserta {peserta.nama} berhasil diperbarui!')
+        return redirect(f'/admin/peserta/{id}')
+    
+    batches = Batch.query.all()
+    return render_template('admin/peserta_edit.html', peserta=peserta, batches=batches)
 
 @main.route('/admin/peserta/<int:id>/toggle-akses', methods=['POST'])
 def toggle_akses(id):
@@ -253,7 +283,8 @@ def toggle_akses(id):
     peserta = Peserta.query.get_or_404(id)
     peserta.akses_workshop = not peserta.akses_workshop
     db.session.commit()
-    return redirect('/admin/peserta')
+    flash(f"Akses workshop {peserta.nama} diubah menjadi {'Aktif' if peserta.akses_workshop else 'Tidak Aktif'}")
+    return redirect(f'/admin/peserta/{id}')
 
 @main.route('/admin/peserta/<int:id>/hapus', methods=['POST'])
 def hapus_peserta(id):
@@ -261,13 +292,78 @@ def hapus_peserta(id):
         return redirect('/admin')
     
     peserta = Peserta.query.get_or_404(id)
+    nama = peserta.nama
     db.session.delete(peserta)
     db.session.commit()
+    flash(f'Peserta {nama} berhasil dihapus!')
     return redirect('/admin/peserta')
 
-# === ADMIN: BUAT BATCH BARU ===
-@main.route('/admin/batch/buat', methods=['GET', 'POST'])
-def buat_batch():
+
+# === ADMIN: GRUP DIKLAT (rename dari batch) ===
+@main.route('/admin/grup')
+def kelola_grup():
+    if not session.get('admin'):
+        return redirect('/admin')
+    grups = Batch.query.all()
+    return render_template('admin/grup_list.html', grups=grups)
+
+
+@main.route('/admin/grup/<int:id>/toggle-akses', methods=['POST'])
+def toggle_akses_grup(id):
+    if not session.get('admin'):
+        return redirect('/admin')
+    grup = Batch.query.get_or_404(id)
+    grup.akses_workshop_default = not grup.akses_workshop_default
+    db.session.commit()
+    # Apply group access setting to all peserta in this grup
+    peserta_list = Peserta.query.filter_by(batch=grup.nama).all()
+    for p in peserta_list:
+        p.akses_workshop = grup.akses_workshop_default
+    db.session.commit()
+    flash(f"Akses workshop untuk grup '{grup.nama}' diubah menjadi {'Aktif' if grup.akses_workshop_default else 'Non-Aktif'} dan diterapkan ke peserta grup.")
+    return redirect('/admin/dashboard')
+
+# === ADMIN: VERIFIKASI PEMBAYARAN ===
+@main.route('/admin/pembayaran')
+def verifikasi_pembayaran():
+    if not session.get('admin'):
+        return redirect('/admin')
+    
+    status = request.args.get('status', 'menunggu')
+    
+    query = Peserta.query
+    if status == 'menunggu':
+        query = query.filter_by(status_pembayaran='Menunggu')
+    elif status == 'lunas':
+        query = query.filter_by(status_pembayaran='Lunas')
+    elif status == 'ditolak':
+        query = query.filter_by(status_pembayaran='Ditolak')
+    else:
+        query = query.filter(Peserta.status_pembayaran.in_(['Menunggu', 'Lunas', 'Ditolak']))
+    
+    peserta_list = query.all()
+    return render_template('admin/verifikasi_pembayaran.html', peserta=peserta_list, status_filter=status)
+
+@main.route('/admin/peserta/<int:id>/verifikasi', methods=['POST'])
+def verifikasi_status(id):
+    if not session.get('admin'):
+        return redirect('/admin')
+    
+    peserta = Peserta.query.get_or_404(id)
+    status = request.form.get('status', 'Menunggu')
+    
+    if status in ['Belum', 'Menunggu', 'Lunas', 'Ditolak']:
+        peserta.status_pembayaran = status
+        db.session.commit()
+        flash(f'Status pembayaran {peserta.nama} diubah menjadi {status}')
+    else:
+        flash('Status tidak valid!')
+    
+    return redirect('/admin/pembayaran')
+
+# === ADMIN: BUAT GRUP DIKLAT BARU ===
+@main.route('/admin/grup/buat', methods=['GET', 'POST'])
+def buat_grup():
     if not session.get('admin'):
         return redirect('/admin')
     
@@ -279,8 +375,8 @@ def buat_batch():
         )
         db.session.add(batch)
         db.session.commit()
-        flash('Batch baru berhasil dibuat!')
-        return redirect('/admin/dashboard')
+        flash('Grup diklat baru berhasil dibuat!')
+        return redirect('/admin/grup')
     
     return render_template('admin/buat_batch.html')
 
